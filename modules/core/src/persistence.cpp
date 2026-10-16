@@ -468,6 +468,8 @@ void FileStorage::Impl::release(String *out) {
         if (out)
             out->clear();
         if (write_mode) {
+            // emit a sequence that is still delayed in Base64 mode, so it is closed below
+            workaround();
             while (write_stack.size() > 1) {
                 endWriteStruct();
             }
@@ -482,6 +484,9 @@ void FileStorage::Impl::release(String *out) {
         }
     }
     closeFile();
+    delete[] delayed_struct_key;
+    delete[] delayed_type_name;
+    delete base64_writer;
     init();
 }
 
@@ -1944,6 +1949,8 @@ void FileStorage::startWriteStruct(const String& name, int struct_flags, const S
 
 void FileStorage::endWriteStruct()
 {
+    if (p->write_mode && p->write_stack.size() <= 1 && !p->is_write_struct_delayed)
+        CV_Error(Error::StsError, "endWriteStruct() is called without matching startWriteStruct()");
     p->endWriteStruct();
     state = p->write_stack.empty() || FileNode::isMap(p->write_stack.back().flags) ?
         FileStorage::NAME_EXPECTED + FileStorage::INSIDE_MAP :
@@ -1960,8 +1967,8 @@ bool FileStorage::open(const String& filename, int flags, const String& encoding
     try
     {
         bool ok = p->open(filename.c_str(), flags, encoding.c_str());
-        if(ok)
-            state = FileStorage::NAME_EXPECTED + FileStorage::INSIDE_MAP;
+        state = ok ? FileStorage::NAME_EXPECTED + FileStorage::INSIDE_MAP : FileStorage::UNDEFINED;
+        elname = String();
         return ok;
     }
     catch (...)
@@ -1976,6 +1983,8 @@ bool FileStorage::isOpened() const { return p->is_opened; }
 void FileStorage::release()
 {
     p->release();
+    state = FileStorage::UNDEFINED;
+    elname = String();
 }
 
 FileNode FileStorage::root(int i) const
@@ -2059,6 +2068,8 @@ String FileStorage::releaseAndGetString()
 {
     String buf;
     p->release(&buf);
+    state = FileStorage::UNDEFINED;
+    elname = String();
     return buf;
 }
 
@@ -2142,7 +2153,7 @@ FileStorage& operator << (FileStorage& fs, const String& str)
 
     if( c == '}' || c == ']' )
     {
-        if( fs_impl->write_stack.empty() )
+        if( fs_impl->write_stack.size() <= 1 && !fs_impl->is_write_struct_delayed )
             CV_Error_( cv::Error::StsError, ("Extra closing '%c'", *_str) );
 
         fs_impl->workaround();

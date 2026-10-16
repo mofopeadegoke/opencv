@@ -2172,6 +2172,70 @@ TEST(Core_InputOutput, FileStorage_read_bigint_as_real_29363)
     EXPECT_EQ((int64_t)6662329666LL, (int64_t)fs["a"]);  // int64 path unchanged
 }
 
+typedef testing::TestWithParam<const char*> FileStorage_release;
+
+// https://github.com/opencv/opencv/issues/30338
+TEST_P(FileStorage_release, delayed_base64_seq)
+{
+    // In Base64 mode a sequence is not emitted until its contents are known.
+    // release() must finish such a sequence like an explicit endWriteStruct() does,
+    // instead of dropping (and leaking) it.
+    const int flags = FileStorage::WRITE | FileStorage::MEMORY | FileStorage::BASE64;
+    FileStorage fs_ref(GetParam(), flags);
+    fs_ref.write("a", 1);
+    fs_ref.startWriteStruct("s", FileNode::SEQ);
+    fs_ref.endWriteStruct();
+    String expected = fs_ref.releaseAndGetString();
+
+    FileStorage fs_stream(GetParam(), flags);
+    fs_stream << "a" << 1 << "s" << "[" << "]";
+    EXPECT_EQ(expected, fs_stream.releaseAndGetString());
+
+    FileStorage fs(GetParam(), flags);
+    fs.write("a", 1);
+    fs.startWriteStruct("s", FileNode::SEQ);
+    String content = fs.releaseAndGetString();
+
+    EXPECT_EQ(expected, content);
+}
+
+TEST_P(FileStorage_release, resets_state)
+{
+    FileStorage fs(GetParam(), FileStorage::WRITE | FileStorage::MEMORY);
+    fs.startWriteStruct("m", FileNode::MAP);
+    fs.write("k", 1);
+    ASSERT_NE((int)FileStorage::UNDEFINED, fs.state);
+    fs.release();
+    EXPECT_EQ((int)FileStorage::UNDEFINED, fs.state);
+
+    fs.open(GetParam(), FileStorage::WRITE | FileStorage::MEMORY);
+    fs.startWriteStruct("m", FileNode::MAP);
+    fs.release();
+    const std::string missing = cv::tempfile(GetParam());
+    EXPECT_FALSE(fs.open(missing, FileStorage::READ));
+    EXPECT_EQ((int)FileStorage::UNDEFINED, fs.state);
+}
+
+TEST_P(FileStorage_release, unbalanced_endWriteStruct)
+{
+    FileStorage fs(GetParam(), FileStorage::WRITE | FileStorage::MEMORY);
+    EXPECT_THROW(fs.endWriteStruct(), cv::Exception);
+    EXPECT_THROW(fs << "}", cv::Exception);
+
+    // the storage stays usable
+    fs.startWriteStruct("x", FileNode::MAP);
+    fs.write("k", 1);
+    fs.endWriteStruct();
+    String content = fs.releaseAndGetString();
+
+    FileStorage fs_r(content, FileStorage::READ | FileStorage::MEMORY);
+    EXPECT_EQ(1, (int)fs_r["x"]["k"]) << content;
+}
+
+INSTANTIATE_TEST_CASE_P(Core_InputOutput,
+    FileStorage_release, Values(".yml", ".xml", ".json")
+);
+
 template <typename T>
 T fsWriteRead(const T& expectedValue, const char* ext)
 {
